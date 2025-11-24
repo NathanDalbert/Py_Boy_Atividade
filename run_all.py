@@ -5,10 +5,16 @@ import os
 import signal
 
 PYTHON = sys.executable
-VENV_PATH = os.getenv("VENV_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv"))
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_ENV_OVERRIDE = os.getenv("VENV_PATH")
+if _ENV_OVERRIDE:
+    VENV_PATH = _ENV_OVERRIDE
+else:
+    dot = os.path.join(BASE_DIR, ".venv")
+    plain = os.path.join(BASE_DIR, "venv")
+    VENV_PATH = dot if os.path.isdir(dot) else plain
 ACTIVATE_PS1 = os.path.join(VENV_PATH, "Scripts", "Activate.ps1")
 USE_VENV = os.path.isfile(ACTIVATE_PS1)
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(BASE_DIR, 'src')
 
 def _build_commands():
@@ -20,8 +26,6 @@ def _build_commands():
     if USE_VENV:
         wrapped = []
         for name, raw in base_cmds:
-            # Encadear ativação da venv antes do comando
-            # Usamos ; para sequenciar em PowerShell
             cmd = f"& '{ACTIVATE_PS1}'; {raw}"
             wrapped.append((name, cmd))
         return wrapped

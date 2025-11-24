@@ -1,8 +1,5 @@
-import sys
-from app.messaging import RabbitMQClient
-from app.config import load_config
-from app.logging_setup import init_logger
-import logging
+import pika
+from datetime import datetime
 
 
 stats = {
@@ -11,44 +8,66 @@ stats = {
 }
 
 def gerar_relatorio_final():
-    print("\n" + "="*40)
-    print("📊 RELATÓRIO FINAL DA SESSÃO (TRIO)")
-    print("="*40)
-    print(f"👣 Total de Passos:      {stats['passos']}")
-    print(f"⚔️  Batalhas Iniciadas:  {stats['batalhas']}")
-    print("="*40)
-    print("Fim da execução.")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    nome_arquivo = f"relatorio_{timestamp}.txt"
+
+    relatorio = [
+        "="*40,
+        "📊 RELATÓRIO FINAL DA SESSÃO (TRIO)",
+        "="*40,
+        f"Data/Hora: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}",
+        "",
+        f"👣 Total de Passos:      {stats['passos']}",
+        f"⚔️  Batalhas Iniciadas:  {stats['batalhas']}",
+        "="*40,
+        "Fim da execução."
+    ]
+
+    for linha in relatorio:
+        print(linha)
+
+    try:
+        with open(nome_arquivo, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(relatorio))
+        print(f"\n💾 Relatório salvo em: {nome_arquivo}")
+    except Exception as e:
+        print(f"\n⚠️ Erro ao salvar relatório: {e}")
 
 def main():
-    
-    init_logger()
-    logger = logging.getLogger("analytics")
-    config = load_config()
-    mq = RabbitMQClient()
+  
     try:
-        mq.connect()
-        mq.declare_queue(config.queue_events)
+        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+        channel = connection.channel()
+        channel.queue_declare(queue='fila_eventos')
     except Exception as e:
-        logger.error("Erro ao conectar no RabbitMQ: %s", e)
+        print(f"❌ Erro ao conectar no RabbitMQ: {e}")
         return
 
-    logger.info("Analytics iniciado. Aguardando eventos...")
+    print("📈 Analytics iniciado! Ouvindo eventos do jogo...")
+    print("➡️  Pressione CTRL+C para encerrar e ver o relatório.")
 
-    def on_event(evento: str):
+    def callback(ch, method, properties, body):
+        evento = body.decode()
+        
         if evento == 'EVENTO_PASSO':
             stats['passos'] += 1
             print(".", end="", flush=True)
+            
         elif evento == 'EVENTO_BATALHA':
             stats['batalhas'] += 1
             print(f"\n[⚔️ BATALHA DETECTADA! Total: {stats['batalhas']}]")
-    mq.consume(config.queue_events, on_event)
+        
+        ch.basic_ack(delivery_tag=method.delivery_tag)
+
+    channel.basic_consume(queue='fila_eventos', on_message_callback=callback)
 
     try:
-        mq.start_consuming()
+        channel.start_consuming()
     except KeyboardInterrupt:
-        mq.stop_consuming()
+      
+        channel.stop_consuming()
         gerar_relatorio_final()
-        mq.close()
+        connection.close()
 
 if __name__ == '__main__':
     main()

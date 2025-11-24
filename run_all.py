@@ -77,7 +77,7 @@ def launch_all(auto_shutdown_on_exit=True):
         procs.append((name, p))
         time.sleep(0.4)
 
-    print("\nTodos iniciados. CTRL+C aqui para encerrar todos juntos.")
+    print("\nTodos iniciados.")
     try:
         while True:
             time.sleep(2)

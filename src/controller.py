@@ -1,14 +1,19 @@
-import pika
 import sys
+from app.messaging import RabbitMQClient
+from app.config import load_config
+from app.logging_setup import init_logger
+import logging
 
 def enviar_comandos():
+    init_logger()
+    logger = logging.getLogger("controller")
+    config = load_config()
+    mq = RabbitMQClient()
     try:
-        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
-        channel = connection.channel()
-        channel.queue_declare(queue='fila_comandos')
-    except pika.exceptions.AMQPConnectionError:
-        print("❌ Erro: Não foi possível conectar ao RabbitMQ.")
-        print("Certifique-se de que o Docker está rodando: 'docker start rabbitmq-trio'")
+        mq.connect()
+        mq.declare_queue(config.queue_commands)
+    except Exception:
+        logger.error("Não foi possível conectar ao RabbitMQ. Verifique se o serviço está ativo.")
         return
 
     print("\n🎮 Controlador Iniciado!")
@@ -27,7 +32,6 @@ def enviar_comandos():
             if comando == 'SAIR':
                 break
             
-     
             comandos_validos = [
                 'UP', 'DOWN', 'LEFT', 'RIGHT', 'A', 'B', 'START', 'SELECT',
                 'TURBO', 'NORMAL', 'LENTO',
@@ -35,11 +39,9 @@ def enviar_comandos():
             ]
 
             if comando in comandos_validos:
-       
-                channel.basic_publish(exchange='',
-                                      routing_key='fila_comandos',
-                                      body=comando)
-                print(f" [x] Enviado: '{comando}'")
+
+                mq.publish(config.queue_commands, comando)
+                logger.info("Comando enviado: %s", comando)
             else:
                 if comando:
                     print(f" ⚠️  Comando desconhecido.")
@@ -48,7 +50,7 @@ def enviar_comandos():
             break
 
     print("\nEncerrando controlador...")
-    connection.close()
+    mq.close()
 
 if __name__ == '__main__':
     enviar_comandos()

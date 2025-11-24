@@ -1,5 +1,8 @@
-import pika
 import sys
+from app.messaging import RabbitMQClient
+from app.config import load_config
+from app.logging_setup import init_logger
+import logging
 
 
 stats = {
@@ -17,40 +20,35 @@ def gerar_relatorio_final():
     print("Fim da execução.")
 
 def main():
-  
+    
+    init_logger()
+    logger = logging.getLogger("analytics")
+    config = load_config()
+    mq = RabbitMQClient()
     try:
-        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
-        channel = connection.channel()
-        channel.queue_declare(queue='fila_eventos') # Escuta a fila de saída
+        mq.connect()
+        mq.declare_queue(config.queue_events)
     except Exception as e:
-        print(f"❌ Erro ao conectar no RabbitMQ: {e}")
+        logger.error("Erro ao conectar no RabbitMQ: %s", e)
         return
 
-    print("📈 Analytics iniciado! Ouvindo eventos do jogo...")
-    print("➡️  Pressione CTRL+C para encerrar e ver o relatório.")
+    logger.info("Analytics iniciado. Aguardando eventos...")
 
-    def callback(ch, method, properties, body):
-        evento = body.decode()
-        
+    def on_event(evento: str):
         if evento == 'EVENTO_PASSO':
             stats['passos'] += 1
             print(".", end="", flush=True)
-            
         elif evento == 'EVENTO_BATALHA':
             stats['batalhas'] += 1
             print(f"\n[⚔️ BATALHA DETECTADA! Total: {stats['batalhas']}]")
-        
-        ch.basic_ack(delivery_tag=method.delivery_tag)
-
-    channel.basic_consume(queue='fila_eventos', on_message_callback=callback)
+    mq.consume(config.queue_events, on_event)
 
     try:
-        channel.start_consuming()
+        mq.start_consuming()
     except KeyboardInterrupt:
-      
-        channel.stop_consuming()
+        mq.stop_consuming()
         gerar_relatorio_final()
-        connection.close()
+        mq.close()
 
 if __name__ == '__main__':
     main()

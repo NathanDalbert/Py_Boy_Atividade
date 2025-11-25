@@ -12,6 +12,7 @@ def enviar_comandos():
     try:
         mq.connect()
         mq.declare_queue(config.queue_commands)
+        mq.declare_queue(config.queue_events)
     except Exception:
         logger.error("Não foi possível conectar ao RabbitMQ. Verifique se o serviço está ativo.")
         return
@@ -39,8 +40,10 @@ def enviar_comandos():
             ]
 
             if comando in comandos_validos:
-
+                # Enviar para o game_loop executar
                 mq.publish(config.queue_commands, comando)
+                # Enviar para o analytics contabilizar
+                mq.publish(config.queue_events, f'COMANDO_{comando}')
                 logger.info("Comando enviado: %s", comando)
             else:
                 if comando:

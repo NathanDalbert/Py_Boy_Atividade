@@ -22,7 +22,7 @@ def enviar_comandos():
     print("🕹️  MOVIMENTO:  UP, DOWN, LEFT, RIGHT")
     print("🔴 BOTÕES:     A, B, START, SELECT")
     print("⚙️  VELOCIDADE: TURBO, NORMAL, LENTO")
-    print("🔊 ÁUDIO:      VOL+, VOL-, MUTE")
+    print("🔊 ÁUDIO:      VOL+, VOL-, MUTE, UNMUTE")
     print("="*40)
     print("Digite 'SAIR' para encerrar.\n")
 

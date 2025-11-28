@@ -2,13 +2,15 @@
 from __future__ import annotations
 import pika
 import logging
+import os
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
 class RabbitMQClient:
-    def __init__(self, host: str = "localhost"):
-        self._host = host
+    def __init__(self, host: str = None):
+        default_host = os.environ.get("RABBITMQ_HOST", "127.0.0.1")
+        self._host = host or default_host
         self._connection: Optional[pika.BlockingConnection] = None
         self._channel: Optional[pika.channel.Channel] = None
 
@@ -16,7 +18,13 @@ class RabbitMQClient:
         if self._connection and self._connection.is_open:
             return
         try:
-            params = pika.ConnectionParameters(self._host)
+            params = pika.ConnectionParameters(
+                host=self._host,
+                connection_attempts=3,
+                retry_delay=2,
+                socket_timeout=10,
+                blocked_connection_timeout=300
+            )
             self._connection = pika.BlockingConnection(params)
             self._channel = self._connection.channel()
             logger.info("Conectado ao RabbitMQ em %s", self._host)

@@ -1,18 +1,108 @@
 version: '3.8'
 
 services:
+  # RabbitMQ - Message Broker
   rabbitmq:
     image: rabbitmq:3-management
     container_name: pyboy_rabbitmq
+    hostname: rabbitmq
     ports:
-      - "5672:5672"     
-      - "15672:15672"   
+      - "5672:5672"      # AMQP protocol
+      - "15672:15672"    # Management UI
     environment:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 30s
     restart: unless-stopped
+    networks:
+      - pyboy_network
+
+  # Game Loop - Emulador PyBoy
+  gameloop:
+    build:
+      context: .
+      dockerfile: Dockerfile.gameloop
+    container_name: pyboy_gameloop
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      PYTHONUNBUFFERED: 1
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - ./roms:/app/roms:ro
+      - ./src:/app/src:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - pyboy_network
+
+  # Controller - Interface de Comandos
+  controller:
+    build:
+      context: .
+      dockerfile: Dockerfile.controller
+    container_name: pyboy_controller
+    stdin_open: true
+    tty: true
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      PYTHONUNBUFFERED: 1
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - pyboy_network
+
+  # Analytics - Coleta de Métricas
+  analytics:
+    build:
+      context: .
+      dockerfile: Dockerfile.analytics
+    container_name: pyboy_analytics
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      PYTHONUNBUFFERED: 1
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src:ro
+      - ./:/app:rw  # Para salvar relatórios
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - pyboy_network
+
+networks:
+  pyboy_network:
+    driver: bridge
+
+volumes:
+  rabbitmq_data:

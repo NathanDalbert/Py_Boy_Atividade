@@ -6,13 +6,13 @@ from app.config import load_config
 from app.volume import VolumeService
 from app.messaging import RabbitMQClient
 from app.logging_setup import init_logger
+from app.health import HealthCheck, HealthCheckMonitor
 import logging
 try:
     from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
     import comtypes
 except ImportError:
     AudioUtilities = None
-
 
 VOLUME_INICIAL = 0
 CONFIG = load_config()
@@ -22,35 +22,59 @@ volume_service = VolumeService(initial_percent=50)
 
 def main():
     global modo_lento_ativo, volume_atual
-    print(f"Iniciando PyBoy com ROM: {CONFIG.rom_path}")
+    print(f"🎮 Iniciando PyBoy com ROM: {CONFIG.rom_path}")
     pyboy = PyBoy(CONFIG.rom_path, window_type="SDL2", sound=True)
-    pyboy.set_emulation_speed(1) 
+    pyboy.set_emulation_speed(1)
 
     if volume_service.is_available():
         print(f"🔊 Volume inicial do processo: {volume_service.get_percent()}%")
     else:
         print("ℹ️ Controle de volume real indisponível.")
 
-
     init_logger()
     logger = logging.getLogger("game_loop")
-    mq = RabbitMQClient()
-    try:
-        mq.connect()
+
+    health = HealthCheck("GameLoop")
+
+    mq = RabbitMQClient(enable_resilience=True)
+
+    connection_success = mq.connect()
+    if connection_success:
         mq.declare_queue(CONFIG.queue_commands)
         mq.declare_queue(CONFIG.queue_events)
-    except Exception:
-        logger.error("Falha ao iniciar conexões RabbitMQ")
-        return
+        logger.info("✅ RabbitMQ conectado com sucesso")
+    else:
+        logger.warning("⚠️  Iniciando em MODO DEGRADADO sem RabbitMQ")
+        logger.warning("    O emulador continuará funcionando localmente")
+        logger.warning("    Comandos remotos não estarão disponíveis")
+
+    health.register_check("rabbitmq", lambda: mq.is_connected)
+    health.register_check("pyboy", lambda: pyboy is not None)
+    health.register_check("volume", lambda: volume_service.is_available())
+
+    monitor = HealthCheckMonitor(health, interval=30.0)
+    monitor.start()
 
     logger.info("Loop iniciado. Aguardando comandos e emitindo eventos...")
 
+    if mq.is_degraded:
+        print("\n" + "="*60)
+        print("⚠️  MODO DEGRADADO ATIVO")
+        print("="*60)
+        print("O emulador está rodando, mas sem conexão com RabbitMQ.")
+        print("Funcionalidades disponíveis:")
+        print("  ✅ Emulação do jogo (funcionando normalmente)")
+        print("  ✅ Controle local via teclado")
+        print("  ❌ Comandos remotos (indisponíveis)")
+        print("  ❌ Analytics (indisponível)")
+        print("\nO serviço tentará reconectar automaticamente.")
+        print("="*60 + "\n")
 
     def on_command(comando: str):
         global modo_lento_ativo, volume_atual
         comando = comando.upper()
         logger.debug("Comando recebido: %s", comando)
-        
+
         if comando == 'TURBO':
             modo_lento_ativo = False
             pyboy.set_emulation_speed(0)
@@ -83,8 +107,7 @@ def main():
         elif comando == 'VOL-':
             volume_atual = volume_service.decrease()
             print(f" 🔉 Volume - -> {volume_atual}%")
-            
-    
+
         else:
             mapa_comandos = {
                 'UP': (WindowEvent.PRESS_ARROW_UP, WindowEvent.RELEASE_ARROW_UP),
@@ -104,36 +127,63 @@ def main():
                 pyboy.send_input(release)
                 for _ in range(10): pyboy.tick()
 
-    mq.consume(CONFIG.queue_commands, on_command)
+    if mq.is_connected:
+        mq.consume(CONFIG.queue_commands, on_command)
+        logger.info("✅ Consumidor de comandos ativo")
+    else:
+        logger.warning("⚠️  Consumidor de comandos inativo (modo degradado)")
 
     last_x = pyboy.memory[MEM_X_POS]
     last_y = pyboy.memory[MEM_Y_POS]
     in_battle = False
+    last_health_check = time.time()
 
     try:
         while pyboy.tick():
-            mq.process_data_events(time_limit=0)
+
+            try:
+                mq.process_data_events(time_limit=0)
+            except Exception as e:
+                logger.debug(f"Erro ao processar eventos: {e}")
+
             curr_x = pyboy.memory[MEM_X_POS]
             curr_y = pyboy.memory[MEM_Y_POS]
-            
+
             if curr_x != last_x or curr_y != last_y:
-                mq.publish(CONFIG.queue_events, 'EVENTO_PASSO')
+
+                if not mq.publish(CONFIG.queue_events, 'EVENTO_PASSO'):
+                    logger.debug("Evento de passo não publicado (modo degradado)")
                 last_x = curr_x
                 last_y = curr_y
+
             battle_val = pyboy.memory[MEM_BATTLE]
             if battle_val != 0 and not in_battle:
-                mq.publish(CONFIG.queue_events, 'EVENTO_BATALHA')
+                if not mq.publish(CONFIG.queue_events, 'EVENTO_BATALHA'):
+                    logger.debug("Evento de batalha não publicado (modo degradado)")
                 in_battle = True
             elif battle_val == 0:
                 in_battle = False
+
             if modo_lento_ativo:
                 time.sleep(0.05)
-            
+
+            now = time.time()
+            if now - last_health_check > 60:
+                health.check_all()
+                if mq.is_connected and not mq.is_degraded:
+                    logger.info("✅ Serviço saudável - RabbitMQ conectado")
+                elif not mq.is_connected:
+                    logger.warning("⚠️  Serviço degradado - RabbitMQ desconectado, tentando reconectar...")
+                last_health_check = now
+
     except KeyboardInterrupt:
         logger.info("Encerrando emulador...")
     finally:
+        monitor.stop()
+        health.print_status()
         pyboy.stop()
         mq.close()
+        logger.info("Game Loop encerrado")
 
 if __name__ == '__main__':
     main()

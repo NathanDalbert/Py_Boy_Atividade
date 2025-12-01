@@ -1,7 +1,12 @@
 import pika
+import time
+import logging
 from datetime import datetime
 from collections import defaultdict
-
+from app.messaging import RabbitMQClient
+from app.config import load_config
+from app.health import HealthCheck, HealthCheckMonitor
+from app.logging_setup import init_logger
 
 stats = {
     'passos': 0,
@@ -14,17 +19,17 @@ stats = {
     'comandos_detalhados': defaultdict(int),
     'inicio_sessao': None,
     'fim_sessao': None,
-    'historico_passos': []  # [(timestamp, total_passos)]
+    'historico_passos': [],
+    'eventos_perdidos': 0
 }
 
 def gerar_relatorio_final():
-    # Marcar fim da sessão
+
     stats['fim_sessao'] = datetime.now()
 
     timestamp = stats['fim_sessao'].strftime("%Y%m%d_%H%M%S")
     nome_arquivo = f"relatorio_{timestamp}.txt"
 
-    # Calcular métricas derivadas
     duracao = None
     passos_por_minuto = 0
     taxa_batalha = 0
@@ -38,7 +43,6 @@ def gerar_relatorio_final():
     if stats['passos'] > 0:
         taxa_batalha = (stats['batalhas'] / stats['passos']) * 100
 
-    # Construir relatório
     relatorio = [
         "="*60,
         "📊 RELATÓRIO FINAL DA SESSÃO - POKÉMON RED EMULATOR",
@@ -47,7 +51,6 @@ def gerar_relatorio_final():
         ""
     ]
 
-    # Seção: Tempo de Sessão
     if duracao:
         horas = int(duracao.total_seconds() // 3600)
         minutos = int((duracao.total_seconds() % 3600) // 60)
@@ -61,7 +64,6 @@ def gerar_relatorio_final():
             ""
         ])
 
-    # Seção: Estatísticas de Movimento
     relatorio.extend([
         "🚶 MOVIMENTO E EXPLORAÇÃO",
         "-" * 60,
@@ -72,7 +74,6 @@ def gerar_relatorio_final():
         relatorio.append(f"   🏃 Ritmo de Jogo:         {passos_por_minuto:.1f} passos/min")
     relatorio.append("")
 
-    # Seção: Batalhas
     relatorio.extend([
         "⚔️  BATALHAS",
         "-" * 60,
@@ -85,7 +86,6 @@ def gerar_relatorio_final():
             relatorio.append(f"   📈 Média:                 1 batalha a cada {passos_por_batalha:.1f} passos")
     relatorio.append("")
 
-    # Seção: Comandos Executados
     if stats['comandos_total'] > 0:
         relatorio.extend([
             "🎮 COMANDOS EXECUTADOS",
@@ -98,7 +98,6 @@ def gerar_relatorio_final():
             ""
         ])
 
-        # Top 5 comandos mais usados
         if stats['comandos_detalhados']:
             top_comandos = sorted(stats['comandos_detalhados'].items(),
                                  key=lambda x: x[1], reverse=True)[:5]
@@ -109,7 +108,6 @@ def gerar_relatorio_final():
                 relatorio.append(f"      {i}. {cmd:8} → {count:4} vezes")
             relatorio.append("")
 
-    # Seção: Performance
     if duracao and stats['comandos_total'] > 0:
         comandos_por_minuto = stats['comandos_total'] / (duracao.total_seconds() / 60)
         relatorio.extend([
@@ -120,18 +118,22 @@ def gerar_relatorio_final():
             ""
         ])
 
-    # Rodapé
     relatorio.extend([
         "="*60,
+    ])
+
+    if stats['eventos_perdidos'] > 0:
+        relatorio.append(f"⚠️  Eventos perdidos (modo degradado): {stats['eventos_perdidos']}")
+        relatorio.append("")
+
+    relatorio.extend([
         "✅ Fim da execução - Sessão encerrada com sucesso!",
         "="*60
     ])
 
-    # Exibir no console
     for linha in relatorio:
         print(linha)
 
-    # Salvar em arquivo TXT
     try:
         with open(nome_arquivo, 'w', encoding='utf-8') as f:
             f.write('\n'.join(relatorio))
@@ -140,29 +142,51 @@ def gerar_relatorio_final():
         print(f"\n⚠️ Erro ao salvar relatório: {e}")
 
 def main():
-    # Inicializar tempo de sessão
+
     stats['inicio_sessao'] = datetime.now()
 
-    try:
-        connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
-        channel = connection.channel()
-        channel.queue_declare(queue='fila_eventos')
-    except Exception as e:
-        print(f"❌ Erro ao conectar no RabbitMQ: {e}")
-        return
+    init_logger()
+    logger = logging.getLogger("analytics")
+
+    health = HealthCheck("Analytics")
+
+    config = load_config()
+
+    mq = RabbitMQClient(enable_resilience=True)
+
+    connection_success = mq.connect()
+
+    if connection_success:
+        mq.declare_queue(config.queue_events)
+        logger.info("✅ RabbitMQ conectado com sucesso")
+    else:
+        logger.warning("⚠️  Iniciando em MODO DEGRADADO sem RabbitMQ")
+        print("\n" + "="*60)
+        print("⚠️  AVISO: Analytics em MODO DEGRADADO")
+        print("="*60)
+        print("Analytics continuará rodando, mas não receberá eventos.")
+        print("Dados serão coletados quando o RabbitMQ voltar.")
+        print("="*60 + "\n")
+
+    health.register_check("rabbitmq", lambda: mq.is_connected)
+
+    monitor = HealthCheckMonitor(health, interval=30.0)
+    monitor.start()
 
     print("📈 Analytics iniciado! Ouvindo eventos do jogo...")
     print("➡️  Pressione CTRL+C para encerrar e ver o relatório.")
 
-    # Categorização de comandos
+    if mq.is_degraded:
+        print("⚠️  Status: MODO DEGRADADO (sem RabbitMQ)")
+        print("    Tentará reconectar automaticamente...\n")
+
     movimentos = {'UP', 'DOWN', 'LEFT', 'RIGHT'}
     botoes = {'A', 'B', 'START', 'SELECT'}
     velocidades = {'TURBO', 'NORMAL', 'LENTO'}
     audio = {'VOL+', 'VOL-', 'MUTE', 'UNMUTE'}
 
-    def callback_eventos(ch, method, _, body):
-        evento = body.decode()
-
+    def callback_eventos(evento: str):
+        """Callback para processar eventos do RabbitMQ"""
         if evento == 'EVENTO_PASSO':
             stats['passos'] += 1
             print(".", end="", flush=True)
@@ -171,15 +195,12 @@ def main():
             stats['batalhas'] += 1
             print(f"\n[⚔️ BATALHA DETECTADA! Total: {stats['batalhas']}]")
 
-        # Capturar comandos enviados pelo controller (prefixo COMANDO_)
         elif evento.startswith('COMANDO_'):
             comando = evento.replace('COMANDO_', '')
 
-            # Contadores gerais
             stats['comandos_total'] += 1
             stats['comandos_detalhados'][comando] += 1
 
-            # Categorização
             if comando in movimentos:
                 stats['comandos_movimento'] += 1
             elif comando in botoes:
@@ -189,17 +210,45 @@ def main():
             elif comando in audio:
                 stats['comandos_audio'] += 1
 
-        ch.basic_ack(delivery_tag=method.delivery_tag)
+    if mq.is_connected:
+        mq.consume(config.queue_events, callback_eventos)
+        logger.info("✅ Consumidor de eventos ativo")
+    else:
+        logger.warning("⚠️  Consumidor de eventos inativo (modo degradado)")
 
-    # Consumir apenas fila_eventos
-    channel.basic_consume(queue='fila_eventos', on_message_callback=callback_eventos)
+    last_reconnect_attempt = time.time()
+    reconnect_interval = 30.0
 
     try:
-        channel.start_consuming()
+        while True:
+            if mq.is_connected:
+
+                try:
+                    mq.process_data_events(time_limit=1)
+                except Exception as e:
+                    logger.warning(f"Erro ao processar eventos: {e}")
+                    stats['eventos_perdidos'] += 1
+            else:
+
+                now = time.time()
+                if now - last_reconnect_attempt > reconnect_interval:
+                    logger.info("🔄 Tentando reconectar ao RabbitMQ...")
+                    if mq.connect():
+                        mq.declare_queue(config.queue_events)
+                        mq.consume(config.queue_events, callback_eventos)
+                        logger.info("✅ Reconectado! Analytics voltou ao normal")
+                        print("\n[✅ Analytics reconectado ao RabbitMQ!]")
+                    last_reconnect_attempt = now
+
+                time.sleep(1)
+
     except KeyboardInterrupt:
-        channel.stop_consuming()
+        logger.info("Encerrando Analytics...")
+    finally:
+        monitor.stop()
+        mq.close()
         gerar_relatorio_final()
-        connection.close()
+        logger.info("Analytics encerrado")
 
 if __name__ == '__main__':
     main()

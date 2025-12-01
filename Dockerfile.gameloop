@@ -1,0 +1,31 @@
+FROM python:3.11-slim
+
+# Instalar dependências do sistema para PyBoy e SDL2
+RUN apt-get update && apt-get install -y \
+    libsdl2-dev \
+    libsdl2-2.0-0 \
+    xvfb \
+    x11vnc \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copiar requirements
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copiar código fonte
+COPY src/ ./src/
+COPY roms/ ./roms/
+
+# Variáveis de ambiente
+ENV PYTHONUNBUFFERED=1
+ENV RABBITMQ_HOST=rabbitmq
+ENV SDL_VIDEODRIVER=dummy
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD python -c "import sys; sys.exit(0)"
+
+# Executar game_loop
+CMD ["python", "-u", "src/game_loop.py"]
